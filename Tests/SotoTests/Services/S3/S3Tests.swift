@@ -446,6 +446,50 @@ class S3Tests: XCTestCase {
         XCTAssertNoThrow(try response.wait())
     }
 
+    func testFileStreamRequestObject() {
+        // create buffer
+        let dataSize = 457_017
+        var data = Data(count: dataSize)
+        for i in 0..<dataSize {
+            data[i] = UInt8.random(in: 0...255)
+        }
+        let name = TestEnvironment.generateResourceName()
+        let filename = "testFileStreamRequestObject"
+        let fileURL = URL(fileURLWithPath: filename)
+        try data.write(to: fileURL)
+        defer {
+            XCTAssertNoThrow(try FileManager.default.removeItem(at: fileURL))
+        }
+
+        let threadPool = NIOThreadPool(numberOfThreads: 1)
+        threadPool.start()
+        let fileIO = NonBlockingFileIO(threadPool: threadPool)
+        let fileHandle = try fileIO.openFile(path: filename, mode: .read, eventLoop: httpClient.eventLoopGroup.next()).wait()
+        defer {
+            XCTAssertNoThrow(try fileHandle.close())
+            XCTAssertNoThrow(try threadPool.syncShutdownGracefully())
+        }
+        let payload = AWSPayload.fileHandle(fileHandle, offset: 0, size: dataSize, fileIO: fileIO)
+                                        
+        let response = Self.createBucket(name: name, s3: s3)
+            .hop(to: runOnEventLoop)
+            .flatMap { _ -> EventLoopFuture<S3.PutObjectOutput> in
+                let putRequest = S3.PutObjectRequest(body: payload, bucket: name, key: "tempfile")
+                return s3.putObject(putRequest, on: runOnEventLoop)
+            }
+            .flatMap { _ -> EventLoopFuture<S3.GetObjectOutput> in
+                let getRequest = S3.GetObjectRequest(bucket: name, key: "tempfile")
+                return s3.getObject(getRequest, on: runOnEventLoop)
+            }
+            .map { response in
+                XCTAssertEqual(data, response.body?.asData())
+            }
+            .flatAlways { _ in
+                return Self.deleteBucket(name: name, s3: s3)
+            }
+        XCTAssertNoThrow(try response.wait())
+    }
+
     func testStreamResponseObject() {
         // testing eventLoop so need to use MultiThreadedEventLoopGroup
         let elg = MultiThreadedEventLoopGroup(numberOfThreads: 3)
